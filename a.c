@@ -7,8 +7,8 @@
 #define Seconds60 60
 
 unsigned char fl_reg;
-unsigned char flueger_state;
-unsigned char flueger_average;
+unsigned int flueger_state;
+unsigned int flueger_average;
 
 unsigned int anem_pin_counter;
 unsigned int anem_pin_second;
@@ -23,23 +23,10 @@ void main(void)
     //    DCOCTL = CALDCO_1MHZ;
 
     P1OUT = 0;
-    P1DIR = 0xFF; // (BIT0 | BIT6); // according to the user guide p340
-    P1DIR &= ~(FLUEGER_FOTO_1 | FLUEGER_FOTO_2);
-    //    P1REN |= BIT3;
-    /*
-      while(1) // pin state echo monitor - delete it later
-       {
-       if(P1IN & FLUEGER_FOTO_1)
-       P1OUT |= BIT0;
-       else
-       P1OUT &= ~BIT0;
-       if(P1IN & FLUEGER_FOTO_2)
-       P1OUT |= BIT6;
-       else
-       P1OUT &= ~BIT6;
-       }
-    */
-    P1IES &= ~(FLUEGER_FOTO_1 | FLUEGER_FOTO_2 | ANEM_FOTO); // low -> high is selected with IES.x = 0
+    P1DIR = ~(FLUEGER_FOTO_1 | FLUEGER_FOTO_2 | ANEM_FOTO); // according to the user guide p340
+    P1REN |= (FLUEGER_FOTO_1 | FLUEGER_FOTO_2 | ANEM_FOTO); // as phototransistors will set pins high
+    fl_reg = P1IN & (FLUEGER_FOTO_1 | FLUEGER_FOTO_2);
+    P1IES &= ~(fl_reg | ANEM_FOTO); // low -> high is selected with IES.x = 0
     P1IFG &= ~(FLUEGER_FOTO_1 | FLUEGER_FOTO_2 | ANEM_FOTO); // To prevent an immediate interrupt, clear the flag before enabling the interrupt
     // P1IE  |=  (FLUEGER_FOTO_1 | FLUEGER_FOTO_2 | ANEM_FOTO); // Enable interrupts for the selected pins
 
@@ -62,8 +49,6 @@ void main(void)
     flueger_state = 0;
     anem_pin_counter = 0;
     anem_pin_second = 0;
-
-    fl_reg = P1IN & (FLUEGER_FOTO_1 | FLUEGER_FOTO_2);
 
     _BIS_SR(GIE + LPM3_bits);
 }
@@ -168,13 +153,7 @@ void USCI0TX_isr(void)
 {
     uart_byte ++;
     unsigned char one_char = ' ';
-    if(uart_byte > 17)
-        IE2 &= ~UCA0TXIE;
-    else if(uart_byte == 17)
-        one_char = '\n';
-    else if(uart_byte == 16)
-        one_char = '\r';
-    else if(uart_byte < 5)
+    if(uart_byte < 5)
     {
         const unsigned int degree = uart_byte == 4 ? 1 : uart_byte == 3 ? 10 : uart_byte == 2 ? 100 : 1000;
         one_char = '0';
@@ -195,6 +174,15 @@ void USCI0TX_isr(void)
             one_char ++;
             flueger_average -= degree;
         }
+    }
+    else if(uart_byte == 16)
+        one_char = '\r';
+    else if(uart_byte == 17)
+        one_char = '\n';
+    else if(uart_byte > 17)
+    {
+        IE2 &= ~UCA0TXIE;
+        return;
     }
     UCA0TXBUF = one_char;
 }
