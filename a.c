@@ -6,6 +6,9 @@
 #define ANEM_FOTO BIT3
 #define Seconds60 60
 
+//unsigned char arch_write_to, arch_uart_from;
+//struct {  unsigned int flueger, anem;  } arch[60];
+
 unsigned char fl_reg;
 unsigned int flueger_state;
 unsigned int flueger_average;
@@ -14,6 +17,10 @@ unsigned int anem_pin_counter;
 unsigned int anem_pin_second;
 unsigned int anem_average;
 unsigned char uart_byte;
+
+char oC_degree;
+
+//-----------------------------------------------------------------------
 
 void main(void)
 {
@@ -37,6 +44,11 @@ void main(void)
     BCSCTL3 = LFXT1S_0 | XCAP_3;
     BCSCTL1 |= DIVA_3;
 
+    ADC10CTL1 = INCH_10 + ADC10DIV_7 + ADC10SSEL_1; // Temp Sensor ADC10CLK/4 ACLK
+    ADC10CTL1 |= SHS1;    // start sampling on signal from TA.0 (p569)
+    ADC10CTL1 |= CONSEQ1; // Repeat-single-channel
+    ADC10CTL0 = SREF_1 + ADC10SHT_3 + REFON + ADC10ON;// + ADC10IE + ENC + ADC10SC;
+
     P1SEL = BIT1 + BIT2 ;                     // P1.1 = RXD, P1.2=TXD
     P1SEL2 = BIT1 + BIT2;
     UCA0CTL1 |= UCSSEL_1;                     // CLK = ACLK
@@ -52,6 +64,8 @@ void main(void)
 
     _BIS_SR(GIE + LPM3_bits);
 }
+
+//-----------------------------------------------------------------------
 
 __attribute__((interrupt (PORT1_VECTOR)))
 void P1_isr(void)
@@ -119,6 +133,7 @@ void P1_isr(void)
     P1IFG = 0;
 }
 
+//-----------------------------------------------------------------------
 
 __attribute__((interrupt (TIMER0_A0_VECTOR)))
 void CCR0_isr(void)
@@ -143,11 +158,27 @@ void CCR0_isr(void)
         UCA0TXBUF = one_char;
         IE2 |= UCA0TXIE;  // Enable USCI_A0 TX interrupt
 
+        ADC10CTL0 |= ADC10IE;
         P1IE  |= (FLUEGER_FOTO_1 | FLUEGER_FOTO_2 | ANEM_FOTO);
     }
 }
 
-// USCI A0/B0 Transmit ISR
+//-----------------------------------------------------------------------
+
+__attribute__((interrupt (ADC10_VECTOR)))
+void ADC10_isr(void)
+{
+    // oC = ((A10/1024)*1500mV)-986mV)*1/3.55mV = A10*423/1024 - 278
+    long temp = ADC10MEM;
+    oC_degree = ((temp - 673) * 423) / 1024;
+    if(oC_degree < 15)
+        P1OUT |= BIT5;
+    else
+        P1OUT &= ~BIT5;
+}
+
+//-----------------------------------------------------------------------
+
 __attribute__ ((interrupt (USCIAB0TX_VECTOR)))
 void USCI0TX_isr(void)
 {
@@ -173,6 +204,20 @@ void USCI0TX_isr(void)
         {
             one_char ++;
             flueger_average -= degree;
+        }
+    }
+    else if(uart_byte == 9)
+        one_char = ' ';
+    else if(uart_byte == 10)
+        one_char = oC_degree < 0 ? '-' : '+';
+    else if(uart_byte < 14)
+    {
+        const unsigned char degree = uart_byte == 13 ? 1 : uart_byte == 12 ? 10 : 100;
+        one_char = '0';
+        while(oC_degree > degree)
+        {
+            one_char ++;
+            oC_degree -= degree;
         }
     }
     else if(uart_byte == 16)
