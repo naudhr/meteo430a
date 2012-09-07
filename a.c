@@ -89,7 +89,6 @@ void P1_isr(void)
             else
                 flueger_state += 3;
         }
-        P1OUT ^= BIT0;
         P1IES ^= FLUEGER_FOTO_1; // swith the edge detection
         P1IFG &= ~FLUEGER_FOTO_1;
     }
@@ -111,7 +110,6 @@ void P1_isr(void)
             else
                 flueger_state -= 3;
         }
-        P1OUT ^= BIT6;
         P1IES ^= FLUEGER_FOTO_2; // swith the edge detection
         P1IFG &= ~FLUEGER_FOTO_2;
     }
@@ -169,7 +167,20 @@ __attribute__((interrupt (ADC10_VECTOR)))
 void ADC10_isr(void)
 {
     // oC = ((A10/1024)*1500mV)-986mV)*1/3.55mV = A10*423/1024 - 278
-    long temp = ADC10MEM;
+    const long temp = ADC10MEM;
+
+    int oC_degree_ = ((temp - 673) * 423) / 1024;
+    if(oC_degree_ < oC_degree)
+    {
+        P1OUT |= BIT0;
+        P1OUT &= ~BIT6;
+    }
+    else if(oC_degree_ > oC_degree)
+    {
+        P1OUT &= ~BIT0;
+        P1OUT |= BIT6;
+    }
+
     oC_degree = ((temp - 673) * 423) / 1024;
     if(oC_degree < 15)
         P1OUT |= BIT5;
