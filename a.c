@@ -4,6 +4,7 @@
 #define FLUEGER_FOTO_1 BIT4
 #define FLUEGER_FOTO_2 BIT5
 #define ANEM_FOTO BIT3
+#define HEATER BIT0
 #define Seconds60 60
 
 //unsigned char arch_write_to, arch_uart_from;
@@ -26,43 +27,37 @@ void main(void)
 {
     WDTCTL = WDTPW + WDTHOLD;
 
-    //    BCSCTL1 = CALBC1_1MHZ;
-    //    DCOCTL = CALDCO_1MHZ;
-
     P1OUT = 0;
     P1DIR = ~(FLUEGER_FOTO_1 | FLUEGER_FOTO_2 | ANEM_FOTO); // according to the user guide p340
     P1REN |= (FLUEGER_FOTO_1 | FLUEGER_FOTO_2 | ANEM_FOTO); // as phototransistors will set pins high
     fl_reg = P1IN & (FLUEGER_FOTO_1 | FLUEGER_FOTO_2);
     P1IES &= ~(fl_reg | ANEM_FOTO); // low -> high is selected with IES.x = 0
     P1IFG &= ~(FLUEGER_FOTO_1 | FLUEGER_FOTO_2 | ANEM_FOTO); // To prevent an immediate interrupt, clear the flag before enabling the interrupt
-    // P1IE  |=  (FLUEGER_FOTO_1 | FLUEGER_FOTO_2 | ANEM_FOTO); // Enable interrupts for the selected pins
 
-    TA0CCR0 = 512;
-    TA0CCTL0 = CCIE;
+    TA0CCR0 = 4096;
+    //TA0CCR1 = 200;
+    TA0CCTL0 = CCIE | OUTMOD_3; // making a set/reset sequence to feed adc10 trigger
     TA0CTL = TASSEL_1 | MC_1 | ID_3 | TACLR;
 
     BCSCTL3 = LFXT1S_0 | XCAP_3;
-    BCSCTL1 |= DIVA_3;
+    //BCSCTL1 |= DIVA_3;
 
-    ADC10CTL1 = INCH_10 + ADC10DIV_7 + ADC10SSEL_1; // Temp Sensor ADC10CLK/4 ACLK
-    ADC10CTL1 |= SHS1;    // start sampling on signal from TA.0 (p569)
-    ADC10CTL1 |= CONSEQ1; // Repeat-single-channel
-    ADC10CTL0 = SREF_1 + ADC10SHT_3 + REFON + ADC10ON;// + ADC10IE + ENC + ADC10SC;
+    ADC10CTL1 = INCH_10 + ADC10DIV_7 + CONSEQ_2 + SHS_2 + ADC10SSEL_3; // Temp Sensor ADC10CLK/4 ACLK Repeat-single-channel Sampling on signal from TA.0
+    ADC10CTL0 = SREF_1 + ADC10SHT_3 + REFON + ADC10ON + ENC;
 
     P1SEL = BIT1 + BIT2 ;                     // P1.1 = RXD, P1.2=TXD
     P1SEL2 = BIT1 + BIT2;
     UCA0CTL1 |= UCSSEL_1;                     // CLK = ACLK
     UCA0BR0 = 0x03;                           // 32kHz/9600 = 3.41
     UCA0BR1 = 0x00;
-    UCA0MCTL = UCBRS1 + UCBRS0;               // Modulation UCBRSx = 3
+    UCA0MCTL = UCBRS1 + UCBRS0;               // Modulation UCBRSx = 3 ( == (3.41-3)*8  p432 )
     UCA0CTL1 &= ~UCSWRST;                     // **Initialize USCI state machine**
-    // IE2 |= UCA0TXIE;               // Enable USCI_A0 TX interrupt
 
     flueger_state = 0;
     anem_pin_counter = 0;
     anem_pin_second = 0;
 
-    _BIS_SR(GIE + LPM3_bits);
+    _BIS_SR(GIE + LPM0_bits);
 }
 
 //-----------------------------------------------------------------------
@@ -120,12 +115,10 @@ void P1_isr(void)
 
     if(P1IFG & ANEM_FOTO)
     {
-        anem_pin_counter ++;
-        if(anem_pin_counter == 0) // overflown
-        {
-            anem_pin_counter = 0xFFFF;
+        if(anem_pin_counter == 0xFFFF) // overflown
             P1IE &= ~ANEM_FOTO;
-        }
+        else
+            anem_pin_counter ++;
         P1IFG &= ~ANEM_FOTO;
     }
     P1IFG = 0;
@@ -168,24 +161,11 @@ void ADC10_isr(void)
 {
     // oC = ((A10/1024)*1500mV)-986mV)*1/3.55mV = A10*423/1024 - 278
     const long temp = ADC10MEM;
-
-    int oC_degree_ = ((temp - 673) * 423) / 1024;
-    if(oC_degree_ < oC_degree)
-    {
-        P1OUT |= BIT0;
-        P1OUT &= ~BIT6;
-    }
-    else if(oC_degree_ > oC_degree)
-    {
-        P1OUT &= ~BIT0;
-        P1OUT |= BIT6;
-    }
-
     oC_degree = ((temp - 673) * 423) / 1024;
     if(oC_degree < 15)
-        P1OUT |= BIT5;
+        P1OUT |= HEATER;
     else
-        P1OUT &= ~BIT5;
+        P1OUT &= ~HEATER;
 }
 
 //-----------------------------------------------------------------------
@@ -193,6 +173,8 @@ void ADC10_isr(void)
 __attribute__ ((interrupt (USCIAB0TX_VECTOR)))
 void USCI0TX_isr(void)
 {
+    P1OUT |= BIT6;
+
     uart_byte ++;
     unsigned char one_char = ' ';
     if(uart_byte < 5)
@@ -238,6 +220,7 @@ void USCI0TX_isr(void)
     else if(uart_byte > 17)
     {
         IE2 &= ~UCA0TXIE;
+    P1OUT &= ~BIT6;
         return;
     }
     UCA0TXBUF = one_char;
