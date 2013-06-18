@@ -1,25 +1,31 @@
 //#include <msp430g2553.h>
 #include <msp430.h>
 
-#define FLUEGER_FOTO_1 BIT4
-#define FLUEGER_FOTO_2 BIT5
+#include "pff2a/pff.h"
+
+#define FLUEGER_FOTO_1 BIT6
+#define FLUEGER_FOTO_2 BIT7
 #define ANEM_FOTO BIT3
 #define HEATER BIT0
 #define Seconds60 60
+#define DataBufLen 30
 
 //unsigned char arch_write_to, arch_uart_from;
 //struct {  unsigned int flueger, anem;  } arch[60];
 
 unsigned char fl_reg;
-unsigned int flueger_state;
-unsigned int flueger_average;
+unsigned char anem_pin_second;
 
-unsigned int anem_pin_counter;
-unsigned int anem_pin_second;
-unsigned int anem_average;
-unsigned char uart_byte;
+struct DumpData {
+    unsigned int anem;
+    unsigned char flug;
+    char tC;
+} data_buf[DataBufLen];
+unsigned char data_index;
 
-char oC_degree;
+//-----------------------------------------------------------------------
+
+static void dump_to_sd(void);
 
 //-----------------------------------------------------------------------
 
@@ -28,8 +34,8 @@ void main(void)
     WDTCTL = WDTPW + WDTHOLD;
 
     P1OUT = 0;
-    P1DIR = ~(FLUEGER_FOTO_1 | FLUEGER_FOTO_2 | ANEM_FOTO); // according to the user guide p340
-    P1REN |= (FLUEGER_FOTO_1 | FLUEGER_FOTO_2 | ANEM_FOTO); // as phototransistors will set pins high
+    P1DIR = 0xFF ^ (FLUEGER_FOTO_1 | FLUEGER_FOTO_2 | ANEM_FOTO); // according to the user guide p340
+    P1REN = (FLUEGER_FOTO_1 | FLUEGER_FOTO_2 | ANEM_FOTO); // as phototransistors will set pins high
     fl_reg = P1IN & (FLUEGER_FOTO_1 | FLUEGER_FOTO_2);
     P1IES &= ~(fl_reg | ANEM_FOTO); // low -> high is selected with IES.x = 0
     P1IFG &= ~(FLUEGER_FOTO_1 | FLUEGER_FOTO_2 | ANEM_FOTO); // To prevent an immediate interrupt, clear the flag before enabling the interrupt
@@ -53,11 +59,16 @@ void main(void)
     UCA0MCTL = UCBRS1 + UCBRS0;               // Modulation UCBRSx = 3 ( == (3.41-3)*8  p432 )
     UCA0CTL1 &= ~UCSWRST;                     // **Initialize USCI state machine**
 
-    flueger_state = 0;
-    anem_pin_counter = 0;
-    anem_pin_second = 0;
+    while(1)
+    {
+        data_index = 0;
+        for(unsigned char i=0; i<DataBufLen; ++i)
+            data_buf[i].anem = data_buf[i].flug = data_buf[i].tC = 0;
+        anem_pin_second = 0;
 
-    _BIS_SR(GIE + LPM0_bits);
+        _BIS_SR(GIE + LPM3_bits);
+        dump_to_sd();
+    }
 }
 
 //-----------------------------------------------------------------------
@@ -65,6 +76,7 @@ void main(void)
 __attribute__((interrupt (PORT1_VECTOR)))
 void P1_isr(void)
 {
+    struct DumpData* d = data_buf + data_index;
     // FLUEGER_* handling assumes the detector following the switching 1/3 mode
     if(P1IFG & FLUEGER_FOTO_1)
     {
@@ -72,17 +84,17 @@ void P1_isr(void)
         {
             fl_reg &= ~FLUEGER_FOTO_1;
             if(fl_reg & FLUEGER_FOTO_2)
-                flueger_state += 3;
+                d->flug ++;
             else
-                flueger_state -= 3;
+                d->flug --;
         }
         else
         {
             fl_reg |= FLUEGER_FOTO_1;
             if(fl_reg & FLUEGER_FOTO_2)
-                flueger_state -= 3;
+                d->flug --;
             else
-                flueger_state += 3;
+                d->flug ++;
         }
         P1IES ^= FLUEGER_FOTO_1; // swith the edge detection
         P1IFG &= ~FLUEGER_FOTO_1;
@@ -93,32 +105,32 @@ void P1_isr(void)
         {
             fl_reg &= ~FLUEGER_FOTO_2;
             if(fl_reg & FLUEGER_FOTO_1)
-                flueger_state -= 3;
+                d->flug --;
             else
-                flueger_state += 3;
+                d->flug ++;
         }
         else
         {
             fl_reg |= FLUEGER_FOTO_2;
             if(fl_reg & FLUEGER_FOTO_1)
-                flueger_state += 3;
+                d->flug ++;
             else
-                flueger_state -= 3;
+                d->flug --;
         }
         P1IES ^= FLUEGER_FOTO_2; // swith the edge detection
         P1IFG &= ~FLUEGER_FOTO_2;
     }
-    if(flueger_state > 360)
-        flueger_state -= 360;
-    if(flueger_state < 0)
-        flueger_state += 360;
+    if(d->flug == 0xFF) // overflown
+        d->flug = 119;
+    else if(d->flug > 120)
+        d->flug -= 120;
 
     if(P1IFG & ANEM_FOTO)
     {
-        if(anem_pin_counter == 0xFFFF) // overflown
+        if(d->anem == 0xFFFF) // overflown
             P1IE &= ~ANEM_FOTO;
         else
-            anem_pin_counter ++;
+            d->anem ++;
         P1IFG &= ~ANEM_FOTO;
     }
     P1IFG = 0;
@@ -132,25 +144,17 @@ void CCR0_isr(void)
     anem_pin_second++;
     if(anem_pin_second >= Seconds60)
     {
-        flueger_average = flueger_state;
-        anem_average = anem_pin_counter / Seconds60;
-
-        anem_pin_counter = 0;
         anem_pin_second = 0;
-
-        uart_byte = 0;
-
-        unsigned char one_char = '0';
-        while(anem_average > 10000)
-        {
-            one_char ++;
-            anem_average -= 10000;
-        }
-        UCA0TXBUF = one_char;
-        IE2 |= UCA0TXIE;  // Enable USCI_A0 TX interrupt
 
         ADC10CTL0 |= ADC10IE;
         P1IE  |= (FLUEGER_FOTO_1 | FLUEGER_FOTO_2 | ANEM_FOTO);
+
+        data_index ++;
+        if(data_index >= DataBufLen)
+        {
+            data_index = 0;
+            _BIC_SR_IRQ(LPM3_bits);
+        }
     }
 }
 
@@ -161,7 +165,7 @@ void ADC10_isr(void)
 {
     // oC = ((A10/1024)*1500mV)-986mV)*1/3.55mV = A10*423/1024 - 278
     const long temp = ADC10MEM;
-    oC_degree = ((temp - 673) * 423) / 1024;
+    char oC_degree = ((temp - 673) * 423) / 1024;
     if(oC_degree < 15)
         P1OUT |= HEATER;
     else
@@ -170,59 +174,76 @@ void ADC10_isr(void)
 
 //-----------------------------------------------------------------------
 
-__attribute__ ((interrupt (USCIAB0TX_VECTOR)))
-void USCI0TX_isr(void)
-{
-    P1OUT |= BIT6;
 
-    uart_byte ++;
-    unsigned char one_char = ' ';
-    if(uart_byte < 5)
+static void data_to_str(const struct DumpData* d, char* s, unsigned char len)
+{
+    for(unsigned char byte = 0; byte < len; ++byte)
     {
-        const unsigned int degree = uart_byte == 4 ? 1 : uart_byte == 3 ? 10 : uart_byte == 2 ? 100 : 1000;
-        one_char = '0';
-        while(anem_average > degree)
+        char* c = s + byte;
+        if(byte < 5)
         {
-            one_char ++;
-            anem_average -= degree;
+            unsigned int anem_average = d->anem;
+            const unsigned int degree = byte == 4 ? 1 : byte == 3 ? 10 : byte == 2 ? 100 : byte == 1 ? 1000 : 10000;
+            *c = '0';
+            while(anem_average > degree)
+            {
+                *c ++;
+                anem_average -= degree;
+            }
         }
-    }
-    else if(uart_byte == 5)
-        one_char = ' ';
-    else if(uart_byte < 9)
-    {
-        const unsigned char degree = uart_byte == 8 ? 1 : uart_byte == 7 ? 10 : 100;
-        one_char = '0';
-        while(flueger_average > degree)
+        else if(byte == 5)
+            *c = ' ';
+        else if(byte < 9)
         {
-            one_char ++;
-            flueger_average -= degree;
+            unsigned char flueger_average = d->flug;
+            const unsigned char degree = byte == 8 ? 1 : byte == 7 ? 10 : 100;
+            *c = '0';
+            while(flueger_average > degree)
+            {
+                *c ++;
+                flueger_average -= degree;
+            }
         }
-    }
-    else if(uart_byte == 9)
-        one_char = ' ';
-    else if(uart_byte == 10)
-        one_char = oC_degree < 0 ? '-' : '+';
-    else if(uart_byte < 14)
-    {
-        const unsigned char degree = uart_byte == 13 ? 1 : uart_byte == 12 ? 10 : 100;
-        one_char = '0';
-        while(oC_degree > degree)
+        else if(byte == 9)
+            *c = ' ';
+        else if(byte == 10)
+            *c = d->tC < 0 ? '-' : '+';
+        else if(byte < 14)
         {
-            one_char ++;
-            oC_degree -= degree;
+            unsigned char oC_degree = d->tC < 0 ? -d->tC : d->tC;
+            const unsigned char degree = byte == 13 ? 1 : byte == 12 ? 10 : 100;
+            *c = '0';
+            while(oC_degree > degree)
+            {
+                *c ++;
+                oC_degree -= degree;
+            }
         }
+        else if(byte == 14)
+            *c = '\r';
+        else if(byte == 15)
+            *c = '\n';
+        else
+            *c = ' ';
     }
-    else if(uart_byte == 16)
-        one_char = '\r';
-    else if(uart_byte == 17)
-        one_char = '\n';
-    else if(uart_byte > 17)
-    {
-        IE2 &= ~UCA0TXIE;
-    P1OUT &= ~BIT6;
+}
+
+
+static void dump_to_sd(void)
+{
+    char dump[DataBufLen * 16];
+    for(unsigned char i=0; i<DataBufLen; i++)
+        data_to_str(data_buf + i, dump + 16*i, 16);
+    if(pf_open("kek") != FR_OK)
         return;
+    pf_lseek(0xFF);
+    WORD bytes_written = 0;
+    while(sizeof(dump) > bytes_written)
+    {
+        WORD bw;
+        if(pf_write(dump+bytes_written, sizeof(dump)-bytes_written, &bw) != FR_OK)
+            break;
+        bytes_written += bw;
     }
-    UCA0TXBUF = one_char;
 }
 
